@@ -250,10 +250,32 @@ qmplot(lon, lat, data = crimes, maptype = "toner-lite", color = I("red"), alpha 
 
 # Crimes Area Classification 
 # Sufficient amount of data exists for each geographic area. 
-crimes
+area_pred <- crimes |> 
+  select(-c(dr_no, area_name, rpt_dist_no, crm_cd_desc, premis_desc, 
+            weapon_desc, location, cross_street))
 
+# Feature Engineering
+# Time to Report 
+area_pred <- area_pred |> 
+  mutate(date_rptd = as.POSIXct(date_rptd)) |> 
+  mutate(time_to_rep_hrs = as.numeric(date_rptd - date_occ) / 3600) |> 
+  select(-c(date_rptd))
 
-
+# Datetime of crime occurance
+area_pred <- area_pred |> 
+  mutate(
+    dttime_occ = make_datetime(
+      year = year(date_occ),
+      month = month(date_occ),
+      day = day(date_occ),
+      hour = hour(time_occ),
+      min = minute(time_occ),
+      sec = second(time_occ)
+    )
+  ) |> 
+  select(-c(date_occ, time_occ)) |> 
+  select(dttime_occ, everything()) |> 
+  arrange(dttime_occ)
 
 
 

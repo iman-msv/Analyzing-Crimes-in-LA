@@ -5,7 +5,7 @@ if (!require(pacman)) {
 }
 
 # Loading Required Packages
-p_load(tidyverse, magrittr,scales, ggmap)
+p_load(tidyverse, magrittr, scales, ggmap, naniar, tidymodels)
 
 # Reading Crimes Data
 crimes <- read_csv("crimes.csv")
@@ -249,20 +249,25 @@ crimes <- crimes |>
 qmplot(lon, lat, data = crimes, maptype = "toner-lite", color = I("red"), alpha = I(0.01))
 
 # Crimes Area Classification 
-# Sufficient amount of data exists for each geographic area. 
-area_pred <- crimes |> 
+crimes <- crimes |>
+  mutate(area = as.factor(area))
+
+str(crimes)
+
+# Feature Engineering
+# Dropping Unnecessary Columns
+crime_areas_df <- crimes |> 
   select(-c(dr_no, area_name, rpt_dist_no, crm_cd_desc, premis_desc, 
             weapon_desc, location, cross_street))
 
-# Feature Engineering
-# Time to Report 
-area_pred <- area_pred |> 
+# Time to Report Crimes
+crime_areas_df <- crime_areas_df |> 
   mutate(date_rptd = as.POSIXct(date_rptd)) |> 
   mutate(time_to_rep_hrs = as.numeric(date_rptd - date_occ) / 3600) |> 
   select(-c(date_rptd))
 
-# Datetime of crime occurance
-area_pred <- area_pred |> 
+# Integration of Time Occurance
+crime_areas_df <- crime_areas_df |> 
   mutate(
     dttime_occ = make_datetime(
       year = year(date_occ),
@@ -277,24 +282,145 @@ area_pred <- area_pred |>
   select(dttime_occ, everything()) |> 
   arrange(dttime_occ)
 
+# Factorizing crm_cd
+crime_areas_df |>
+  select(crm_cd, crm_cd_1, crm_cd_2, crm_cd_3, crm_cd_4)
 
+crime_areas_df |>
+  filter(!is.na(crm_cd_3) | !is.na(crm_cd_4))
 
+crime_areas_df <- crime_areas_df |>
+  select(-c(crm_cd, crm_cd_3, crm_cd_4))
 
+crime_areas_df |>
+  count(crm_cd_2) |>
+  arrange(desc(n))
 
+crime_areas_df <- crime_areas_df |>
+  mutate(crm_cd_2 = !is.na(crm_cd_2)) |>
+  rename(sec_crm = crm_cd_2, crm_cd = crm_cd_1)
 
+crime_areas_df <- crime_areas_df |>
+  mutate(dttime_occ = parse_date_time(dttime_occ, "y-m-d H:M:S")) |>
+  mutate(day_week = wday(dttime_occ, label = TRUE),
+         hour = as.factor(hour(dttime_occ))) |>
+  select(-dttime_occ)
 
+str(crime_areas_df)
 
+crime_areas_df <- crime_areas_df |>
+  select(-c(lat, lon))
 
+crime_areas_df |>
+  summarize(age_mean = mean(vict_age, na.rm = TRUE), .by = area) |>
+  ggplot(aes(x = age_mean, y = fct_reorder(area, age_mean))) + 
+  geom_point(size = 2) + 
+  labs(
+    x = "Average of Victims Age",
+    y = "Area Code",
+    title = "Average Age of Victims across Areas"
+  ) +
+  theme_minimal() + 
+  theme(text = element_text(size = 16))
 
+crime_areas_df |>
+  ggplot(aes(x = area, fill = vict_sex)) + 
+  geom_bar(position = "fill", width = 0.8) + 
+  labs(
+    x = "Area Code",
+    y = "Proportion",
+    title = "Gender of Victims across Areas"
+  ) + 
+  theme(text = element_text(size = 14), 
+        panel.grid.major.x = element_blank())
 
+# Missing Values
+crime_areas_df |>
+  miss_var_summary()
 
+# vict_age, premis_cd, and crm_cd include few missing values, which may
+# suggest MCAR (Missing Completely at Random) and we can remove them
+# without worrying about biasness and sample reduction.
+crime_areas_df <- crime_areas_df |>
+  drop_na(vict_age, premis_cd, crm_cd)
 
+# weapon_used_cd has so many missing values, but it doesn't mean 
+# there has been an issue during data collection or data entry. 
+# There are cases in which no weapon has been used, and NAs represent 
+# those cases. In order to prevent any confusion, a new category is 
+# added to the data set showing no weapon (its code will be 0).
+crime_areas_df <- crime_areas_df |>
+  replace_na(list(weapon_used_cd = 0L))
 
+# Groping by vict_sex, which contains so missing values itself.
+crime_areas_df |>
+  group_by(vict_sex) |> 
+  miss_var_summary() |> 
+  filter(n_miss != 0)
+# Clearly, both vict_sex and vict_descent have direct relationship in 
+# terms of missing values. 
 
+crime_areas_df |>
+  summarize(miss_cases = sum(is.na(vict_sex)), 
+            n = n(),
+            .by = premis_cd) |> 
+  mutate(miss_perc = miss_cases / sum(miss_cases) * 100,
+         n_pct = n / sum(n) * 100) |> 
+  arrange(desc(miss_perc))
 
+# Let's check how missing values varies with the type of weapon
+crime_areas_df |>
+  summarize(miss_cases = sum(is.na(vict_sex)), 
+            n = n(),
+            .by = weapon_used_cd) |> 
+  mutate(miss_perc = miss_cases / sum(miss_cases) * 100,
+         n_pct = n / sum(n) * 100) |> 
+  arrange(desc(miss_perc))
+# Clearly, those cases that the criminal had no weapon, more cases
+# lack information about the sex and descent of the criminal.
+crime_areas_df |>
+  summarize(miss_cases = sum(is.na(vict_sex)), 
+            n = n(),
+            .by = day_week) |> 
+  mutate(miss_perc = miss_cases / sum(miss_cases) * 100,
+         n_pct = n / sum(n) * 100) |> 
+  arrange(desc(miss_perc))
 
+# The majority of missing values in vict_sex and vict_descent (75%)
+# falls into premis_cd of 101. 
 
+crime_areas_df <- crime_areas_df |>
+  mutate(vict_sex = as.factor(vict_sex),
+         vict_descent = as.factor(vict_descent),
+         premis_cd = as.factor(premis_cd),
+         weapon_used_cd = as.factor(weapon_used_cd),
+         status_desc = as.factor(status_desc),
+         crm_cd = as.factor(crm_cd),
+         sec_crm = as.factor(sec_crm))
 
+# Decision Tree
+# Model Object
+decision_mdl <- decision_tree(
+  mode = "classification",
+  engine = "rpart"
+)
+
+# Train-Test Split
+crime_area_split <- initial_split(crime_areas_df, prop = 0.8)
+crime_area_train <- training(crime_area_split)
+crime_area_test <- testing(crime_area_split)
+
+crime_area_rec <- recipe(area ~ ., data = crime_area_train) |>
+  step_dummy(all_factor_predictors())
+
+# Workflow
+crime_area_wk <- workflow() |>
+  add_model(decision_mdl) |>
+  add_recipe(crime_area_rec)
+
+# Fitting the Model
+crime_area_wk |>
+  last_fit(split = crime_area_split)
 
 
 
